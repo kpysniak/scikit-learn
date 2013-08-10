@@ -554,6 +554,55 @@ def _init_centroids(X, k, init, random_state=None, x_squared_norms=None,
     return centers
 
 
+
+def _pick_unique_uniform_labels(distances, n_reassings, random_state):
+    distances = np.ones(distances.shape, dtype=np.int)
+    picks = _pick_unique_labels(distances, n_reassings, random_state)
+
+    return picks
+
+
+def _pick_nonunique_uniform_labels(distances, n_reassings, random_state):
+    n_centers = len(distances)
+    centers = range(n_centers)
+    picks = np.array([centers[random_state.randint(n_centers-1)]
+                      for _ in range(n_reassings)])
+
+    return picks
+
+
+def _pick_nonunique_labels(distances, n_reassings, random_state):
+    rand_vals = random_state.rand(n_reassings)
+    rand_vals *= distances.sum()
+    picks = np.searchsorted(distances.cumsum(),
+                            rand_vals)
+
+    return picks
+
+
+def _pick_unique_labels(distances, n_reassigns, random_state):
+    # array of labels randomly picked
+    picks = np.zeros(n_reassigns, dtype=np.int)
+    distances = np.ma.masked_array(distances)
+
+    # making sure we do not exceed any array
+    iterations = min(len(distances), n_reassigns)
+    for p in range(iterations):
+        # picking one value from set of elements
+        # with their relative probabilities
+        rand_val = random_state.rand() * distances.sum()
+        new_pick = np.searchsorted(distances.cumsum(), rand_val)
+
+        # taking note of pick
+        picks[p] = new_pick
+
+        # label has been picked
+        # it should not be picked next time
+        distances[new_pick] = np.ma.masked
+
+    return picks
+
+
 class KMeans(BaseEstimator, ClusterMixin, TransformerMixin):
     """K-Means clustering
 
@@ -647,7 +696,7 @@ class KMeans(BaseEstimator, ClusterMixin, TransformerMixin):
 
     def __init__(self, n_clusters=8, init='k-means++', n_init=10, max_iter=300,
                  tol=1e-4, precompute_distances=True,
-                 verbose=0, random_state=None, copy_x=True, n_jobs=1):
+                 verbose=0, random_state=None, copy_x=True, n_jobs=1,):
 
         if hasattr(init, '__array__'):
             n_clusters = init.shape[0]
@@ -800,7 +849,7 @@ def _mini_batch_step(X, x_squared_norms, centers, counts,
                      old_center_buffer, compute_squared_diff,
                      distances, random_reassign=False,
                      random_state=None, reassignment_ratio=.01,
-                     verbose=False):
+                     verbose=False, reallocation_type='unique_labels'):
     """Incremental update of the centers for the Minibatch K-Means algorithm
 
     Parameters
@@ -860,10 +909,28 @@ def _mini_batch_step(X, x_squared_norms, centers, counts,
             # Flip the ordering of the distances.
             distances -= distances.max()
             distances *= -1
-            rand_vals = random_state.rand(n_reassigns)
-            rand_vals *= distances.sum()
-            new_centers = np.searchsorted(distances.cumsum(),
-                                          rand_vals)
+
+            # picking number_of_reassingments centers
+            # with probability to their
+            if reallocation_type == 'unique_labels':
+                new_centers = _pick_unique_labels(distances,
+                                                  n_reassigns,
+                                                  random_state)
+            elif reallocation_type == 'nonunique_labels':
+                new_centers = _pick_nonunique_labels(distances,
+                                                     n_reassigns,
+                                                     random_state)
+            elif reallocation_type == 'unique_uniform_labels':
+                new_centers = _pick_unique_uniform_labels(distances,
+                                                          n_reassigns,
+                                                          random_state)
+            elif reallocation_type == 'nonunique_uniform_labels':
+                new_centers = _pick_nonunique_uniform_labels(distances,
+                                                             n_reassigns,
+                                                             random_state)
+            else:
+                raise AttributeError("Unknown type of reallocation.")
+
             if verbose:
                 print("[MiniBatchKMeans] Reassigning %i cluster centers."
                       % n_reassigns)
@@ -1079,7 +1146,8 @@ class MiniBatchKMeans(KMeans):
     def __init__(self, n_clusters=8, init='k-means++', max_iter=100,
                  batch_size=100, verbose=0, compute_labels=True,
                  random_state=None, tol=0.0, max_no_improvement=10,
-                 init_size=None, n_init=3, reassignment_ratio=0.01):
+                 init_size=None, n_init=3, reassignment_ratio=0.01,
+                 reallocation_type='unique_labels'):
 
         super(MiniBatchKMeans, self).__init__(
             n_clusters=n_clusters, init=init, max_iter=max_iter,
@@ -1090,6 +1158,7 @@ class MiniBatchKMeans(KMeans):
         self.compute_labels = compute_labels
         self.init_size = init_size
         self.reassignment_ratio = reassignment_ratio
+        self.reallocation_type = reallocation_type
 
     def fit(self, X, y=None):
         """Compute the centroids on X by chunking it into mini-batches.
@@ -1164,7 +1233,8 @@ class MiniBatchKMeans(KMeans):
             batch_inertia, centers_squared_diff = _mini_batch_step(
                 X_valid, x_squared_norms[validation_indices],
                 cluster_centers, counts, old_center_buffer, False,
-                distances=distances, verbose=self.verbose)
+                distances=distances, verbose=self.verbose,
+                reallocation_type=self.reallocation_type)
 
             # Keep only the best cluster centers across independent inits on
             # the common validation set
@@ -1202,7 +1272,7 @@ class MiniBatchKMeans(KMeans):
                                  % (10 + self.counts_.min()) == 0),
                 random_state=random_state,
                 reassignment_ratio=self.reassignment_ratio,
-                verbose=self.verbose)
+                verbose=self.verbose,reallocation_type=self.reallocation_type)
 
             # Monitor convergence and do early stopping if necessary
             if _mini_batch_convergence(
@@ -1263,7 +1333,8 @@ class MiniBatchKMeans(KMeans):
                          random_reassign=random_reassign, distances=distances,
                          random_state=self.random_state_,
                          reassignment_ratio=self.reassignment_ratio,
-                         verbose=self.verbose)
+                         verbose=self.verbose,
+                         reallocation_type=self.reallocation_type)
 
         if self.compute_labels:
             self.labels_, self.inertia_ = _labels_inertia(
